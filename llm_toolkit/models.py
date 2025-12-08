@@ -1076,8 +1076,8 @@ class AIBinaryModel(GoogleModel):
 class OllamaModel(LLM):
     """Base class for models deployed locally via Ollama."""
     
-    name = 'qwen2.5-coder:3b' # for test
-    context_window = 32768  
+    name = 'ollama-model'
+    context_window = 8192  # Default for many Ollama models
   
     def __init__(
         self,
@@ -1222,4 +1222,10 @@ class OllamaModel(LLM):
             content = choice.message.content
             self._save_output(index, content, response_dir)
 
-DefaultModel = OllamaModel
+class OllamaQwen2_5Coder(OllamaModel):
+    """Qwen2.5 Coder model via Ollama."""
+    
+    name = 'qwen2.5-coder:3b'
+    context_window = 32768
+
+DefaultModel = OllamaQwen2_5Coder
