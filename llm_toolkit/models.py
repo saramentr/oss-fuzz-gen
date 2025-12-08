@@ -1076,7 +1076,7 @@ class AIBinaryModel(GoogleModel):
 class OllamaModel(LLM):
     """Base class for models deployed locally via Ollama."""
     
-    name = 'ollama-model'
+    name = 'qwen2.5-coder:3b' # for test
     context_window = 32768  
   
     def __init__(
