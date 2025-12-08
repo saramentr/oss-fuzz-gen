@@ -1073,12 +1073,20 @@ class AIBinaryModel(GoogleModel):
     # Placeholder: To Be Implemented.
     return
 
+import asyncio
+import concurrent.futures
+from typing import Optional, Union
+import threading
+import time
+
 class OllamaModel(LLM):
-    """Base class for models deployed locally via Ollama."""
+    """Base class for models deployed locally via Ollama with timeout support."""
     
     name = 'ollama-model'
     context_window = 8192  # Default for many Ollama models
-  
+    DEFAULT_TIMEOUT = 600  # 5 minutes default timeout
+    DEFAULT_POLL_INTERVAL = 1.0  # 1 second between status checks
+    
     def __init__(
         self,
         ai_binary: str,
@@ -1086,51 +1094,237 @@ class OllamaModel(LLM):
         num_samples: int = NUM_SAMPLES,
         temperature: float = TEMPERATURE,
         temperature_list: Optional[list[float]] = None,
+        timeout: Optional[float] = None,  # Timeout in seconds
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
     ):
         super().__init__(ai_binary, max_tokens, num_samples, temperature, temperature_list)
-        self.api_base = os.getenv('OLLAMA_API_BASE', 'http://localhost:11434/v1')
+        self.api_base = os.getenv('OLLAMA_API_BASE', 'http://192.168.119.31:11434/v1')
         self.api_key = os.getenv('OLLAMA_API_KEY', 'ollama')  # Ollama обычно не требует ключа
+        self.timeout = timeout or float(os.getenv('OLLAMA_TIMEOUT', DEFAULT_TIMEOUT))
+        self.poll_interval = poll_interval
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         
-    def _get_client(self):
-        """Returns the Ollama client configured for OpenAI-compatible API."""
-        return openai.OpenAI(
-            api_key=self.api_key,
-            base_url=self.api_base
-        )
-    
-    def get_model(self) -> Any:
-        """Returns the underlying model instance."""
-        return self.name
-    
-    def get_chat_client(self, model: Any) -> Any:
-        """Returns a new chat session."""
-        return self._get_client()
-    
-    def prompt_type(self) -> type[prompts.Prompt]:
-        """Returns the expected prompt type."""
-        return prompts.OpenAIPrompt
-    
-    def estimate_token_num(self, text) -> int:
-        """Estimates the number of tokens in |text|."""
-        # Ollama модели обычно используют BPE токенизацию, аналогичную GPT
+    def _check_ollama_health(self, client=None) -> bool:
+        """Check if Ollama server is healthy and responding."""
         try:
-            encoder = tiktoken.encoding_for_model("gpt-3.5-turbo")
-        except KeyError:
-            encoder = tiktoken.get_encoding("cl100k_base")
+            if client is None:
+                client = self._get_client()
             
-        if isinstance(text, str):
-            return len(encoder.encode(text))
-            
-        num_tokens = 0
-        for message in text:
-            num_tokens += 3  # message overhead
-            for key, value in message.items():
-                num_tokens += len(encoder.encode(value))
-                if key == 'name':
-                    num_tokens += 1
-        num_tokens += 3  # reply overhead
+            # Try to list models as a health check
+            import requests
+            health_url = self.api_base.replace('/v1', '') + '/api/tags'
+            response = requests.get(health_url, timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f'Ollama health check failed: {e}')
+            return False
+    
+    def _wait_for_model_ready(self, model_name: str, timeout: float = 60) -> bool:
+        """Wait for specific model to be loaded and ready."""
+        start_time = time.time()
         
-        return num_tokens
+        while time.time() - start_time < timeout:
+            try:
+                import requests
+                # Check if model is loaded
+                url = self.api_base.replace('/v1', '') + '/api/show'
+                response = requests.post(url, json={'name': model_name}, timeout=5)
+                
+                if response.status_code == 200:
+                    logger.info(f'Model {model_name} is ready')
+                    return True
+                
+                # Try to pull the model if not found
+                if response.status_code == 404:
+                    logger.info(f'Model {model_name} not found, attempting to pull...')
+                    pull_url = self.api_base.replace('/v1', '') + '/api/pull'
+                    pull_response = requests.post(pull_url, json={'name': model_name}, timeout=30)
+                    
+                    if pull_response.status_code == 200:
+                        # Stream the pull process
+                        for line in pull_response.iter_lines():
+                            if line:
+                                logger.debug(f'Pull status: {line}')
+                        return True
+                
+            except Exception as e:
+                logger.debug(f'Waiting for model {model_name}: {e}')
+            
+            time.sleep(self.poll_interval)
+        
+        logger.error(f'Model {model_name} not ready after {timeout} seconds')
+        return False
+    
+    def _generate_with_timeout(self, client, messages, config, timeout: float):
+        """Generate response with timeout."""
+        try:
+            # Run the generation in a separate thread with timeout
+            future = self._executor.submit(
+                lambda: client.chat.completions.create(
+                    model=self.name,
+                    messages=messages,
+                    **config
+                )
+            )
+            
+            result = future.result(timeout=timeout)
+            return result
+            
+        except concurrent.futures.TimeoutError:
+            logger.error(f'Generation timeout after {timeout} seconds')
+            raise TimeoutError(f'Ollama response timeout after {timeout} seconds')
+        except Exception as e:
+            logger.error(f'Generation error: {e}')
+            raise
+    
+    def _stream_response(self, client, messages, config, timeout: float) -> str:
+        """Stream response with progress updates and timeout."""
+        full_response = ""
+        start_time = time.time()
+        last_update_time = start_time
+        
+        try:
+            # Create streaming response
+            stream = client.chat.completions.create(
+                model=self.name,
+                messages=messages,
+                stream=True,
+                **config
+            )
+            
+            for chunk in stream:
+                # Check timeout
+                if time.time() - start_time > timeout:
+                    logger.error(f'Stream timeout after {timeout} seconds')
+                    break
+                
+                # Check if we have content
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    
+                    # Log progress every 5 seconds
+                    current_time = time.time()
+                    if current_time - last_update_time > 5:
+                        tokens_so_far = len(full_response.split())
+                        elapsed = current_time - start_time
+                        logger.info(f'Generated {tokens_so_far} tokens in {elapsed:.1f}s '
+                                  f'({tokens_so_far/elapsed:.1f} tokens/sec)')
+                        last_update_time = current_time
+            
+            return full_response
+            
+        except Exception as e:
+            logger.error(f'Streaming error: {e}')
+            if full_response:
+                return full_response
+            raise
+    
+    def _chat_with_retry_and_timeout(self, client, prompt: prompts.Prompt, 
+                                   stream: bool = False, 
+                                   max_retries: int = 3) -> str:
+        """Chat with retry logic and timeout support."""
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Wait for model to be ready before attempting
+                if attempt == 0:  # Only check on first attempt
+                    if not self._wait_for_model_ready(self.name, timeout=30):
+                        logger.warning(f'Model {self.name} may not be ready')
+                
+                # Prepare config
+                config = {
+                    'temperature': self.temperature,
+                    'max_tokens': self.max_tokens,
+                    'n': self.num_samples
+                }
+                
+                messages = prompt.get()
+                
+                # Log the attempt
+                logger.info(f'Ollama request attempt {attempt + 1}/{max_retries} '
+                          f'(timeout: {self.timeout}s, stream: {stream})')
+                
+                if stream:
+                    response = self._stream_response(client, messages, config, self.timeout)
+                else:
+                    completion = self._generate_with_timeout(client, messages, config, self.timeout)
+                    response = completion.choices[0].message.content
+                
+                logger.info(f'Ollama response received ({len(response)} characters)')
+                return response
+                
+            except TimeoutError as e:
+                last_exception = e
+                logger.warning(f'Attempt {attempt + 1} timed out: {e}')
+                if attempt == max_retries - 1:
+                    raise
+                
+                # Exponential backoff
+                backoff_time = min(2 ** attempt, 30)
+                logger.info(f'Retrying in {backoff_time} seconds...')
+                time.sleep(backoff_time)
+                
+            except Exception as e:
+                last_exception = e
+                logger.warning(f'Attempt {attempt + 1} failed: {e}')
+                
+                # Check if it's a connection error
+                if "connection" in str(e).lower() or "connect" in str(e).lower():
+                    logger.info('Connection issue detected, checking Ollama health...')
+                    if not self._check_ollama_health():
+                        logger.error('Ollama server appears to be down')
+                        raise ConnectionError('Ollama server is not responding') from e
+                
+                if attempt == max_retries - 1:
+                    raise last_exception
+                
+                # Wait before retry
+                time.sleep(2 ** attempt)
+        
+        raise last_exception or RuntimeError('Failed to get response from Ollama')
+    
+    def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
+        """Queries LLM in a chat session and returns its response with timeout support."""
+        if self.ai_binary:
+            logger.info('Ollama does not use local AI binary: %s', self.ai_binary)
+        if self.temperature_list:
+            logger.info('Ollama does not allow temperature list: %s', self.temperature_list)
+        
+        # Get client
+        if client is None:
+            client = self._get_client()
+        
+        # Use the enhanced chat method with timeout
+        return self._chat_with_retry_and_timeout(client, prompt, stream=False)
+    
+    def chat_llm_streaming(self, client: Any, prompt: prompts.Prompt) -> str:
+        """Chat with streaming response."""
+        if client is None:
+            client = self._get_client()
+        
+        return self._chat_with_retry_and_timeout(client, prompt, stream=True)
+    
+    def ask_llm(self, prompt: prompts.Prompt) -> str:
+        """Queries LLM a single prompt and returns its response with timeout."""
+        client = self._get_client()
+        
+        return self._chat_with_retry_and_timeout(client, prompt, stream=False)
+    
+    def query_llm(self, prompt: prompts.Prompt, response_dir: str) -> None:
+        """Queries Ollama API and stores response in |response_dir| with timeout support."""
+        if self.ai_binary:
+            logger.info('Ollama does not use local AI binary: %s', self.ai_binary)
+        if self.temperature_list:
+            logger.info('Ollama does not allow temperature list: %s', self.temperature_list)
+        
+        client = self._get_client()
+        
+        response = self._chat_with_retry_and_timeout(client, prompt, stream=False)
+        
+        # Save response
+        self._save_output(0, response, response_dir)
     
     def _get_ollama_api_errors(self) -> list[Type[Exception]]:
         """Returns list of retryable errors for Ollama API."""
@@ -1138,89 +1332,19 @@ class OllamaModel(LLM):
             openai.OpenAIError,
             ConnectionError,
             TimeoutError,
-            ServiceUnavailable
+            TimeoutError,  # Our custom timeout
+            ServiceUnavailable,
+            concurrent.futures.TimeoutError
         ]
     
-    def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
-        """Queries LLM in a chat session and returns its response."""
-        if self.ai_binary:
-            logger.info('Ollama does not use local AI binary: %s', self.ai_binary)
-        if self.temperature_list:
-            logger.info('Ollama does not allow temperature list: %s', self.temperature_list)
-        
-        # Ollama uses OpenAI-compatible API format
-        completion = self.with_retry_on_error(
-            lambda: client.chat.completions.create(
-                model=self.name,
-                messages=prompt.get(),
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                n=self.num_samples
-            ),
-            self._get_ollama_api_errors()
-        )
-        
-        return completion.choices[0].message.content
+    def cleanup(self):
+        """Clean up resources."""
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=False)
     
-    def chat_llm_with_tools(self, client: Any, prompt: Optional[prompts.Prompt], tools) -> Any:
-        """Queries the LLM in the given chat session with tools."""
-        if prompt:
-            messages = prompt.get()
-        else:
-            messages = []
-            
-        result = self.with_retry_on_error(
-            lambda: client.chat.completions.create(
-                model=self.name,
-                messages=messages,
-                tools=tools,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens
-            ),
-            self._get_ollama_api_errors()
-        )
-        return result
-    
-    def ask_llm(self, prompt: prompts.Prompt) -> str:
-        """Queries LLM a single prompt and returns its response."""
-        client = self._get_client()
-        
-        completion = self.with_retry_on_error(
-            lambda: client.chat.completions.create(
-                model=self.name,
-                messages=prompt.get(),
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                n=self.num_samples
-            ),
-            self._get_ollama_api_errors()
-        )
-        
-        return completion.choices[0].message.content
-    
-    def query_llm(self, prompt: prompts.Prompt, response_dir: str) -> None:
-        """Queries Ollama API and stores response in |response_dir|."""
-        if self.ai_binary:
-            logger.info('Ollama does not use local AI binary: %s', self.ai_binary)
-        if self.temperature_list:
-            logger.info('Ollama does not allow temperature list: %s', self.temperature_list)
-        
-        client = self._get_client()
-        
-        completion = self.with_retry_on_error(
-            lambda: client.chat.completions.create(
-                model=self.name,
-                messages=prompt.get(),
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                n=self.num_samples
-            ),
-            self._get_ollama_api_errors()
-        )
-        
-        for index, choice in enumerate(completion.choices):
-            content = choice.message.content
-            self._save_output(index, content, response_dir)
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        self.cleanup()
 
 class OllamaQwen2_5Coder(OllamaModel):
     """Qwen2.5 Coder model via Ollama."""
