@@ -1073,5 +1073,153 @@ class AIBinaryModel(GoogleModel):
     # Placeholder: To Be Implemented.
     return
 
+class OllamaModel(LLM):
+    """Base class for models deployed locally via Ollama."""
+    
+    name = 'ollama-model'
+    context_window = 32768  
+  
+    def __init__(
+        self,
+        ai_binary: str,
+        max_tokens: int = MAX_TOKENS,
+        num_samples: int = NUM_SAMPLES,
+        temperature: float = TEMPERATURE,
+        temperature_list: Optional[list[float]] = None,
+    ):
+        super().__init__(ai_binary, max_tokens, num_samples, temperature, temperature_list)
+        self.api_base = os.getenv('OLLAMA_API_BASE', 'http://localhost:11434/v1')
+        self.api_key = os.getenv('OLLAMA_API_KEY', 'ollama')  # Ollama обычно не требует ключа
+        
+    def _get_client(self):
+        """Returns the Ollama client configured for OpenAI-compatible API."""
+        return openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base
+        )
+    
+    def get_model(self) -> Any:
+        """Returns the underlying model instance."""
+        return self.name
+    
+    def get_chat_client(self, model: Any) -> Any:
+        """Returns a new chat session."""
+        return self._get_client()
+    
+    def prompt_type(self) -> type[prompts.Prompt]:
+        """Returns the expected prompt type."""
+        return prompts.OpenAIPrompt
+    
+    def estimate_token_num(self, text) -> int:
+        """Estimates the number of tokens in |text|."""
+        # Ollama модели обычно используют BPE токенизацию, аналогичную GPT
+        try:
+            encoder = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        except KeyError:
+            encoder = tiktoken.get_encoding("cl100k_base")
+            
+        if isinstance(text, str):
+            return len(encoder.encode(text))
+            
+        num_tokens = 0
+        for message in text:
+            num_tokens += 3  # message overhead
+            for key, value in message.items():
+                num_tokens += len(encoder.encode(value))
+                if key == 'name':
+                    num_tokens += 1
+        num_tokens += 3  # reply overhead
+        
+        return num_tokens
+    
+    def _get_ollama_api_errors(self) -> list[Type[Exception]]:
+        """Returns list of retryable errors for Ollama API."""
+        return [
+            openai.OpenAIError,
+            ConnectionError,
+            TimeoutError,
+            ServiceUnavailable
+        ]
+    
+    def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
+        """Queries LLM in a chat session and returns its response."""
+        if self.ai_binary:
+            logger.info('Ollama does not use local AI binary: %s', self.ai_binary)
+        if self.temperature_list:
+            logger.info('Ollama does not allow temperature list: %s', self.temperature_list)
+        
+        # Ollama uses OpenAI-compatible API format
+        completion = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=prompt.get(),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                n=self.num_samples
+            ),
+            self._get_ollama_api_errors()
+        )
+        
+        return completion.choices[0].message.content
+    
+    def chat_llm_with_tools(self, client: Any, prompt: Optional[prompts.Prompt], tools) -> Any:
+        """Queries the LLM in the given chat session with tools."""
+        if prompt:
+            messages = prompt.get()
+        else:
+            messages = []
+            
+        result = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=messages,
+                tools=tools,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            ),
+            self._get_ollama_api_errors()
+        )
+        return result
+    
+    def ask_llm(self, prompt: prompts.Prompt) -> str:
+        """Queries LLM a single prompt and returns its response."""
+        client = self._get_client()
+        
+        completion = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=prompt.get(),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                n=self.num_samples
+            ),
+            self._get_ollama_api_errors()
+        )
+        
+        return completion.choices[0].message.content
+    
+    def query_llm(self, prompt: prompts.Prompt, response_dir: str) -> None:
+        """Queries Ollama API and stores response in |response_dir|."""
+        if self.ai_binary:
+            logger.info('Ollama does not use local AI binary: %s', self.ai_binary)
+        if self.temperature_list:
+            logger.info('Ollama does not allow temperature list: %s', self.temperature_list)
+        
+        client = self._get_client()
+        
+        completion = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=prompt.get(),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                n=self.num_samples
+            ),
+            self._get_ollama_api_errors()
+        )
+        
+        for index, choice in enumerate(completion.choices):
+            content = choice.message.content
+            self._save_output(index, content, response_dir)
 
-DefaultModel = GeminiV1D5
+DefaultModel = OllamaModel
