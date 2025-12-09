@@ -1477,24 +1477,32 @@ class OpenRouterModel(LLM):
                 pass
         return None
 
-class OpenRouterGeminiPro(OpenRouterModel):
-    """Gemini Pro via OpenRouter."""
+class OpenRouterKatCoderProFree(OpenRouterModel):
+    """Kat Coder Pro (Free) via OpenRouter."""
     
-    name = 'google/gemini-pro'
-    context_window = 32760
+    name = 'kwaipilot/kat-coder-pro:free'
+    context_window = 8192  # Предположительный контекст для бесплатной модели
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._actual_model_id = 'google/gemini-pro'
+        self._actual_model_id = 'kwaipilot/kat-coder-pro:free'
+        # Для бесплатных моделей устанавливаем более консервативные параметры
+        kwargs.setdefault('temperature', 0.3)
+        kwargs.setdefault('max_tokens', 1000)
+        kwargs.setdefault('timeout', 90)  # Больше таймаут для бесплатных моделей
 
-class OpenRouterDeepSeekCoder33B(OpenRouterModel):
-    """DeepSeek Coder 33B via OpenRouter."""
+
+class OpenRouterQwen3CoderFree(OpenRouterModel):
+    """Qwen3 Coder (Free) via OpenRouter."""
     
-    name = 'deepseek/deepseek-coder-33b-instruct'
-    context_window = 16384
+    name = 'qwen/qwen3-coder:free'
+    context_window = 32768  # Qwen3 обычно имеет 32K контекста
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._actual_model_id = 'deepseek/deepseek-coder-33b-instruct'
+        self._actual_model_id = 'qwen/qwen3-coder:free'
+        kwargs.setdefault('temperature', 0.3)
+        kwargs.setdefault('max_tokens', 1500)
+        kwargs.setdefault('timeout', 120)
 
 DefaultModel = OllamaQwen2_5Coder
