@@ -1229,4 +1229,272 @@ class OllamaQwen2_5Coder(OllamaModel):
     name = 'qwen2.5-coder:3b'
     context_window = 32768
 
+class OpenRouterModel(LLM):
+    """Base class for models via OpenRouter.ai API."""
+    
+    name = 'openrouter-model'
+    context_window = 8192  # Default context window
+    OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+    
+    def __init__(
+        self,
+        ai_binary: str,
+        max_tokens: int = MAX_TOKENS,
+        num_samples: int = NUM_SAMPLES,
+        temperature: float = TEMPERATURE,
+        temperature_list: Optional[list[float]] = None,
+        timeout: float = 120.0,  # Default timeout in seconds
+        max_retries: int = 3,
+    ):
+        super().__init__(ai_binary, max_tokens, num_samples, temperature, temperature_list)
+        self.api_key = os.getenv('OPENROUTER_API_KEY', '')
+        self.api_base = os.getenv('OPENROUTER_API_BASE', self.OPENROUTER_BASE_URL)
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/google/oss-fuzz-gen'),
+            'X-Title': os.getenv('OPENROUTER_TITLE', 'OSS-Fuzz-Gen'),
+        }
+        
+        if not self.api_key:
+            logger.warning('OPENROUTER_API_KEY environment variable is not set')
+    
+    def _get_client(self):
+        """Returns the OpenRouter client configured for OpenAI-compatible API."""
+        return openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+            default_headers=self.headers
+        )
+    
+    def get_model(self) -> Any:
+        """Returns the underlying model instance."""
+        return self.name
+    
+    def get_chat_client(self, model: Any) -> Any:
+        """Returns a new chat session."""
+        return self._get_client()
+    
+    def prompt_type(self) -> type[prompts.Prompt]:
+        """Returns the expected prompt type."""
+        return prompts.OpenAIPrompt
+    
+    def estimate_token_num(self, text) -> int:
+        """Estimates the number of tokens in |text|."""
+        try:
+            # OpenRouter models use various tokenizers, use GPT-4 as approximation
+            encoder = tiktoken.encoding_for_model("gpt-4")
+        except KeyError:
+            encoder = tiktoken.get_encoding("cl100k_base")
+            
+        if isinstance(text, str):
+            return len(encoder.encode(text))
+            
+        num_tokens = 0
+        for message in text:
+            num_tokens += 3  # message overhead
+            for key, value in message.items():
+                num_tokens += len(encoder.encode(value))
+                if key == 'name':
+                    num_tokens += 1
+        num_tokens += 3  # reply overhead
+        
+        return num_tokens
+    
+    def _get_openrouter_api_errors(self) -> list[Type[Exception]]:
+        """Returns list of retryable errors for OpenRouter API."""
+        return [
+            openai.OpenAIError,
+            openai.APITimeoutError,
+            openai.APIConnectionError,
+            openai.RateLimitError,
+            ConnectionError,
+            TimeoutError,
+            ServiceUnavailable,
+            TooManyRequests,
+        ]
+    
+    def _get_available_models(self) -> list:
+        """Fetch available models from OpenRouter."""
+        try:
+            response = requests.get(
+                f"{self.api_base}/models",
+                headers={
+                    'Authorization': f'Bearer {self.api_key}',
+                    'HTTP-Referer': self.headers['HTTP-Referer']
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('data', [])
+        except Exception as e:
+            logger.warning(f'Failed to fetch OpenRouter models: {e}')
+            return []
+    
+    def _get_model_info(self, model_id: str) -> Optional[dict]:
+        """Get information about a specific model."""
+        models = self._get_available_models()
+        for model in models:
+            if model.get('id') == model_id:
+                return model
+        return None
+    
+    def _check_model_context_window(self, model_id: str) -> int:
+        """Get the context window size for a model."""
+        model_info = self._get_model_info(model_id)
+        if model_info:
+            context_length = model_info.get('context_length')
+            if context_length:
+                return context_length
+        # Default fallback
+        return self.context_window
+    
+    def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
+        """Queries LLM in a chat session and returns its response."""
+        if self.ai_binary:
+            logger.info('OpenRouter does not use local AI binary: %s', self.ai_binary)
+        if self.temperature_list:
+            logger.info('OpenRouter does not allow temperature list: %s', self.temperature_list)
+        
+        if not self.api_key:
+            raise ValueError('OPENROUTER_API_KEY environment variable is required')
+        
+        # Update context window based on actual model
+        if hasattr(self, '_actual_model_id'):
+            self.context_window = self._check_model_context_window(self._actual_model_id)
+        
+        completion = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=prompt.get(),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                n=self.num_samples,
+                timeout=self.timeout
+            ),
+            self._get_openrouter_api_errors()
+        )
+        
+        return completion.choices[0].message.content
+    
+    def chat_llm_with_tools(self, client: Any, prompt: Optional[prompts.Prompt], tools) -> Any:
+        """Queries the LLM in the given chat session with tools."""
+        if not self.api_key:
+            raise ValueError('OPENROUTER_API_KEY environment variable is required')
+        
+        if prompt:
+            messages = prompt.get()
+        else:
+            messages = []
+            
+        result = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=messages,
+                tools=tools,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                timeout=self.timeout
+            ),
+            self._get_openrouter_api_errors()
+        )
+        return result
+    
+    def ask_llm(self, prompt: prompts.Prompt) -> str:
+        """Queries LLM a single prompt and returns its response."""
+        client = self._get_client()
+        
+        completion = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=prompt.get(),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                n=self.num_samples,
+                timeout=self.timeout
+            ),
+            self._get_openrouter_api_errors()
+        )
+        
+        return completion.choices[0].message.content
+    
+    def query_llm(self, prompt: prompts.Prompt, response_dir: str) -> None:
+        """Queries OpenRouter API and stores response in |response_dir|."""
+        if self.ai_binary:
+            logger.info('OpenRouter does not use local AI binary: %s', self.ai_binary)
+        if self.temperature_list:
+            logger.info('OpenRouter does not allow temperature list: %s', self.temperature_list)
+        
+        if not self.api_key:
+            raise ValueError('OPENROUTER_API_KEY environment variable is required')
+        
+        client = self._get_client()
+        
+        completion = self.with_retry_on_error(
+            lambda: client.chat.completions.create(
+                model=self.name,
+                messages=prompt.get(),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                n=self.num_samples,
+                timeout=self.timeout
+            ),
+            self._get_openrouter_api_errors()
+        )
+        
+        for index, choice in enumerate(completion.choices):
+            content = choice.message.content
+            self._save_output(index, content, response_dir)
+    
+    def get_model_pricing(self, model_id: str = None) -> Optional[dict]:
+        """Get pricing information for a model."""
+        model_id = model_id or self.name
+        model_info = self._get_model_info(model_id)
+        if model_info:
+            pricing = model_info.get('pricing', {})
+            return {
+                'prompt': pricing.get('prompt', 'Unknown'),
+                'completion': pricing.get('completion', 'Unknown'),
+                'currency': pricing.get('currency', 'USD')
+            }
+        return None
+    
+    def calculate_cost_estimate(self, prompt_tokens: int, completion_tokens: int, model_id: str = None) -> Optional[float]:
+        """Calculate estimated cost for a request."""
+        pricing = self.get_model_pricing(model_id)
+        if pricing and pricing['prompt'] != 'Unknown' and pricing['completion'] != 'Unknown':
+            try:
+                prompt_cost_per_token = float(pricing['prompt'].replace('$', '')) / 1_000_000
+                completion_cost_per_token = float(pricing['completion'].replace('$', '')) / 1_000_000
+                total_cost = (prompt_tokens * prompt_cost_per_token) + (completion_tokens * completion_cost_per_token)
+                return total_cost
+            except ValueError:
+                pass
+        return None
+
+class OpenRouterGeminiPro(OpenRouterModel):
+    """Gemini Pro via OpenRouter."""
+    
+    name = 'google/gemini-pro'
+    context_window = 32760
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._actual_model_id = 'google/gemini-pro'
+
+class OpenRouterDeepSeekCoder33B(OpenRouterModel):
+    """DeepSeek Coder 33B via OpenRouter."""
+    
+    name = 'deepseek/deepseek-coder-33b-instruct'
+    context_window = 16384
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._actual_model_id = 'deepseek/deepseek-coder-33b-instruct'
+
 DefaultModel = OllamaQwen2_5Coder
