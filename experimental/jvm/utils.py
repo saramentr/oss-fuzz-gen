@@ -56,12 +56,15 @@ def get_project_name(github_url: str) -> Optional[str]:
   # or
   # SSH Type
   # git@github.com:{user}/{proj_name} or git@github.com:{user}/{proj_name}.git
-
+  # or
+  # http://login:password/domain/namespace/{proj_name}
+  
   # Remove the .git suffix
   if github_url.endswith('.git'):
     github_url = github_url[:-4]
-
-  if github_url.startswith('https://'):
+  if github_url.startswith('http://'):
+    return github_url.split('/')[-1]
+  elif github_url.startswith('https://'):
     # Validate url for HTTPS type
     parsed_url = parse_url(github_url)
     host = parsed_url.host
