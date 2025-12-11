@@ -19,8 +19,8 @@
 # 1) Generate OSS-Fuzz projects from scratch with a single harness.
 # 2) Extract Fuzz Introspector report to provide program analysis data.
 # 3) Run OSS-Fuzz-gen to create a larger set of harnesses.
-
-BENCHMARK_HEURISTICS="${VARIABLE:-jvm-public-candidates}"
+#BENCHMARK_HEURISTICS="${VARIABLE:-jvm-public-candidates}"
+BENCHMARK_HEURISTICS="${VARIABLE:-all-public-candidates}"
 OSS_FUZZ_GEN_MODEL=${MODEL}
 TARGETS_FUZZ="${TARGETS}"
 VAR_HARNESSES_PER_PROJECT="${HARNESS_PER_PROJECT:-5}"
