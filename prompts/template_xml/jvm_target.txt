@@ -12,5 +12,5 @@ For examples:
 2) The method signature follows the format of <code>[Full qualified name of the class].method_name(method_arguments)</code>.
 <code>[org.test.Test].test(int)</code>
 
-The target method belongs to the Java project {PROJECT_NAME} ({PROJECT_URL}).
+The target method belongs to the Java project {PROJECT_NAME}.
 </target>
