@@ -1512,4 +1512,17 @@ class OpenRouterQwen3CoderFree(OpenRouterModel):
         kwargs.setdefault('max_tokens', 1500)
         kwargs.setdefault('timeout', 120)
 
+class DeepSeekRTL2ChimeraFree(OpenRouterModel):
+    """TNG: DeepSeek R1T2 Chimera (Free) via OpenRouter."""
+
+    name = 'tngtech/deepseek-r1t2-chimera:free'
+    context_window = 32768  
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._actual_model_id = 'qwen/qwen3-coder:free'
+        kwargs.setdefault('temperature', 0.3)
+        kwargs.setdefault('max_tokens', 1500)
+        kwargs.setdefault('timeout', 120)
+
 DefaultModel = OllamaQwen2_5Coder
