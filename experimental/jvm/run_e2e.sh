@@ -55,7 +55,7 @@ else
 
   # set up oss-fuzz
   cd $WORKDIR
-  git clone https://github.com/google/oss-fuzz
+  git clone https://github.com/saramentr/oss-fuzz
 
   cd ${OSS_FUZZ_GEN_DIR}
   python3 -m pip install -r ./requirements.txt
