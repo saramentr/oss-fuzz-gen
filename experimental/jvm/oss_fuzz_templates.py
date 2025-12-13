@@ -83,7 +83,10 @@ $EXCLUDE_SPOTLESS_CHECK\
 BUILD_JAVA_MAVEN = r"""BASEDIR=$(pwd)
 chmod +x $SRC/protoc/bin/protoc
 
+echo "1.1.1.1 mygitlab.com" >> /etc/hosts
+
 $MVN clean package -Dmaven.javadoc.skip=true -DskipTests=true -Dpmd.skip=true -Dencoding=UTF-8 \
+-Dversion-control.checkLevel=low -Dmaven.gitcommitid.skip=true \
 -Dmaven.antrun.skip=true -Dcheckstyle.skip=true dependency:copy-dependencies
 """
 
