@@ -1088,7 +1088,7 @@ class OllamaModel(LLM):
         temperature_list: Optional[list[float]] = None,
     ):
         super().__init__(ai_binary, max_tokens, num_samples, temperature, temperature_list)
-        self.api_base = os.getenv('OLLAMA_API_BASE', 'http://192.168.119.31:11434/v1')
+        self.api_base = os.getenv('OLLAMA_API_BASE', 'http://192.168.119.30:11434/v1')
         self.api_key = os.getenv('OLLAMA_API_KEY', 'ollama')  # Ollama обычно не требует ключа
         
     def _get_client(self):
@@ -1228,6 +1228,13 @@ class OllamaQwen2_5Coder(OllamaModel):
     
     name = 'qwen2.5-coder:3b'
     context_window = 32768
+  
+class OllamaSimonPuQwen3Coder30BInstructXL(OllamaModel):
+    """SimonPu/Qwen3-Coder:30B-Instruct Q4_K_XL model via Ollama."""
+    
+    name = 'SimonPu/Qwen3-Coder:30B-Instruct_Q4_K_XL'
+    context_window = 32768
+
 
 class OpenRouterModel(LLM):
     """Base class for models via OpenRouter.ai API."""
