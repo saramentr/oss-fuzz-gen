@@ -120,9 +120,10 @@ done
 
 cd $curr_dir
 cp -r $JAVA_HOME $OUT/
+cp -r ./target/classes/* $OUT/
 
-BUILD_CLASSPATH=$JAZZER_API_PATH:$OUT/jar_temp:
-RUNTIME_CLASSPATH=\$this_dir/jar_temp:\$this_dir
+BUILD_CLASSPATH=$JAZZER_API_PATH:$OUT/jar_temp:./target/classes/
+RUNTIME_CLASSPATH=\$this_dir/jar_temp:\$this_dir:\$this_dir/classes/
 
 for fuzzer in $(ls $SRC/Fuzz*.java)
 do
